@@ -21,15 +21,18 @@ const xlsxStatus = document.getElementById("xlsxStatus");
 const manualRows = [];
 
 const INPUT_MAP = [
-  { 参数: "PD0", 主要来源: "银行", 说明: "不显式考虑物理气候风险的一年违约概率" },
-  { 参数: "PD", 主要来源: "银行或第三方信用-气候模型", 说明: "考虑物理气候风险后的违约概率" },
-  { 参数: "LGD0", 主要来源: "银行", 说明: "基础违约损失率" },
-  { 参数: "EAD", 主要来源: "银行", 说明: "违约暴露，用于转换为金额或RWA口径" },
-  { 参数: "rho", 主要来源: "银行/监管公式", 说明: "资产相关性；默认用 Basel corporate correlation" },
-  { 参数: "Q", 主要来源: "银行/监管", 说明: "VaR置信水平，IRB常用99.9%" },
-  { 参数: "q", 主要来源: "巨灾模型/气象地震等外部模型", 说明: "一年内发生定义好的灾害事件的概率" },
-  { 参数: "alpha_hat", 主要来源: "模型求解", 说明: "由PD0、PD、q通过自洽条件反推" },
-  { 参数: "EL/VaR/UL", 主要来源: "模型输出", 说明: "预期损失、尾部分位损失、非预期损失" },
+  { 参数: "PD0", 主要来源: "银行", 取值范围: "(0%, 100%)；实务上企业一年期PD通常远低于100%", 说明: "不显式考虑物理气候风险的一年违约概率" },
+  { 参数: "PD", 主要来源: "银行或第三方信用-气候模型", 取值范围: "PD0 ≤ PD < (1-q)PD0 + q", 说明: "考虑物理气候风险后的违约概率；这是论文自洽条件" },
+  { 参数: "LGD0", 主要来源: "银行", 取值范围: "(0%, 100%]", 说明: "基础违约损失率" },
+  { 参数: "EAD", 主要来源: "银行", 取值范围: "> 0", 说明: "违约暴露，用于转换为金额或RWA口径" },
+  { 参数: "rho", 主要来源: "银行/监管公式", 取值范围: "(0%, 100%)，可留空自动计算", 说明: "资产相关性；默认用 Basel corporate correlation" },
+  { 参数: "Q", 主要来源: "银行/监管", 取值范围: "(0%, 100%)；资本计量常用99.9%", 说明: "VaR置信水平，IRB常用99.9%" },
+  { 参数: "q", 主要来源: "巨灾模型/气象地震等外部模型", 取值范围: "(0%, 100%]", 说明: "一年内发生定义好的灾害事件的概率" },
+  { 参数: "loss threshold", 主要来源: "巨灾模型", 取值范围: "[0%, 100%]", 说明: "情景物理损害率达到该阈值则定义为巨灾事件" },
+  { 参数: "intensity threshold", 主要来源: "气象/地震/巨灾模型", 取值范围: "有限数字，单位需与情景强度一致", 说明: "情景灾害强度达到该阈值则定义为巨灾事件" },
+  { 参数: "LGD1", 主要来源: "银行+巨灾模型", 取值范围: "LGD0 ≤ LGD1 ≤ 100%", 说明: "气候事件发生后的违约损失率，可由损害率推导或外部指定" },
+  { 参数: "alpha_hat", 主要来源: "模型求解", 取值范围: "由模型反推", 说明: "由PD0、PD、q通过自洽条件反推" },
+  { 参数: "EL/VaR/UL", 主要来源: "模型输出", 取值范围: "由模型输出", 说明: "预期损失、尾部分位损失、非预期损失" },
 ];
 
 const ALIASES = {
@@ -115,6 +118,35 @@ function asNumber(obj, key, fallback) {
   return v === "" || v === null || v === undefined ? fallback : Number(v);
 }
 
+function assertRange(label, value, low = null, high = null, options = {}) {
+  const { lowInclusive = false, highInclusive = false, unit = "" } = options;
+  if (!Number.isFinite(Number(value))) throw new Error(`${label} must be a finite number.`);
+  value = Number(value);
+  if (low !== null) {
+    const bad = lowInclusive ? value < low : value <= low;
+    if (bad) throw new Error(`${label}=${value}${unit} is out of range; expected ${lowInclusive ? ">=" : ">"} ${low}${unit}.`);
+  }
+  if (high !== null) {
+    const bad = highInclusive ? value > high : value >= high;
+    if (bad) throw new Error(`${label}=${value}${unit} is out of range; expected ${highInclusive ? "<=" : "<"} ${high}${unit}.`);
+  }
+}
+
+function assertPct(label, value, options = {}) {
+  assertRange(label, Number(value), 0, 100, {
+    lowInclusive: !!options.allowZero,
+    highInclusive: !!options.allow100,
+    unit: "%",
+  });
+}
+
+function assertProb(label, value, options = {}) {
+  assertRange(label, Number(value), 0, 1, {
+    lowInclusive: !!options.allowZero,
+    highInclusive: !!options.allowOne,
+  });
+}
+
 function parseNumberList(text) {
   const values = String(text || "").split(/[\s,;，；]+/).filter(Boolean).map(Number);
   if (!values.length || values.some((x) => Number.isNaN(x))) throw new Error("Scenario values must be numeric.");
@@ -195,18 +227,47 @@ function lossVarBisection(pd0, qClimate, alphaHat, rho, lgd0, lgd1, qLevel) {
 
 function computeQ(payload) {
   const mode = payload.qMode || "direct";
-  if (mode === "direct") return [pct(asNumber(payload, "qDirectPct", 3)), "direct"];
-  if (mode === "return_period") return [qFromReturnPeriod(asNumber(payload, "returnPeriodYears", 33), asNumber(payload, "horizonYears", 1)), "return period"];
-  if (mode === "poisson_rate") return [qFromPoissonRate(asNumber(payload, "eventRatePerYear", 0.03), asNumber(payload, "horizonYears", 1)), "Poisson rate"];
-  if (mode === "loss_threshold") return [qFromLossThreshold(parseNumberList(payload.lossRatesText), pct(asNumber(payload, "lossThresholdPct", 10))), "loss threshold"];
-  if (mode === "intensity_threshold") return [qFromIntensityThreshold(parseNumberList(payload.intensityValuesText), asNumber(payload, "intensityThreshold", 3)), "intensity threshold"];
+  if (mode === "direct") {
+    const qPct = asNumber(payload, "qDirectPct", 3);
+    assertPct("q (%)", qPct, { allow100: true });
+    return [pct(qPct), "direct"];
+  }
+  if (mode === "return_period") {
+    assertRange("Return period", asNumber(payload, "returnPeriodYears", 33), 0);
+    assertRange("Horizon", asNumber(payload, "horizonYears", 1), 0);
+    return [qFromReturnPeriod(asNumber(payload, "returnPeriodYears", 33), asNumber(payload, "horizonYears", 1)), "return period"];
+  }
+  if (mode === "poisson_rate") {
+    assertRange("Poisson event rate per year", asNumber(payload, "eventRatePerYear", 0.03), 0, null, { lowInclusive: true });
+    assertRange("Horizon", asNumber(payload, "horizonYears", 1), 0);
+    return [qFromPoissonRate(asNumber(payload, "eventRatePerYear", 0.03), asNumber(payload, "horizonYears", 1)), "Poisson rate"];
+  }
+  if (mode === "loss_threshold") {
+    const losses = parseNumberList(payload.lossRatesText);
+    losses.forEach((loss, i) => assertRange(`Scenario loss rate #${i + 1}`, loss, 0, null, { lowInclusive: true }));
+    const thresholdPct = asNumber(payload, "lossThresholdPct", 10);
+    assertPct("Loss threshold (%)", thresholdPct, { allowZero: true, allow100: true });
+    return [qFromLossThreshold(losses, pct(thresholdPct)), "loss threshold"];
+  }
+  if (mode === "intensity_threshold") {
+    const intensities = parseNumberList(payload.intensityValuesText);
+    intensities.forEach((x, i) => assertRange(`Scenario intensity #${i + 1}`, x));
+    assertRange("Intensity threshold", asNumber(payload, "intensityThreshold", 3));
+    return [qFromIntensityThreshold(intensities, asNumber(payload, "intensityThreshold", 3)), "intensity threshold"];
+  }
   throw new Error(`Unknown q mode: ${mode}`);
 }
 
 function computePd(payload, pd0, qClimate) {
   const mode = payload.pdMode || "direct";
-  if (mode === "direct") return [pct(asNumber(payload, "pdClimatePct", 0.337)), "direct"];
+  if (mode === "direct") {
+    const pdPct = asNumber(payload, "pdClimatePct", 0.337);
+    assertPct("Climate-adjusted PD (%)", pdPct);
+    return [pct(pdPct), "direct"];
+  }
   if (mode === "frequency_uplift") {
+    assertPct("Long-run q (%)", asNumber(payload, "longRunQPct", 1.7));
+    assertRange("Default uplift when frequency doubles (%)", asNumber(payload, "defaultUpliftWhenFrequencyDoublesPct", 16.1), -100, 1000, { unit: "%" });
     return [pdFromFrequencyUplift(pd0, qClimate, pct(asNumber(payload, "longRunQPct", 1.7)), pct(asNumber(payload, "defaultUpliftWhenFrequencyDoublesPct", 16.1))), "frequency uplift"];
   }
   throw new Error(`Unknown PD mode: ${mode}`);
@@ -256,9 +317,37 @@ function runModel(config) {
 }
 
 function payloadToConfig(payload) {
-  const pd0 = pct(asNumber(payload, "pd0Pct", 0.3));
+  const pd0Pct = asNumber(payload, "pd0Pct", 0.3);
+  assertPct("PD0 (%)", pd0Pct);
+  const pd0 = pct(pd0Pct);
   const [qClimate, qSource] = computeQ(payload);
+  try {
+    assertProb("q", qClimate, { allowOne: true });
+  } catch (err) {
+    throw new Error(`${err.message} Current q mode is ${qSource}; if a loss/intensity threshold produced q=0, no scenario exceeded the threshold, so lower the threshold or add more catastrophe scenarios.`);
+  }
   const [pdClimate, pdSource] = computePd(payload, pd0, qClimate);
+  assertProb("Climate-adjusted PD", pdClimate);
+  if (pdClimate < pd0) {
+    throw new Error(`Climate-adjusted PD=${fmtPct(pdClimate)} cannot be lower than PD0=${fmtPct(pd0)}; the physical risk model assumes climate risk does not reduce PD.`);
+  }
+  const maxPd = (1 - qClimate) * pd0 + qClimate;
+  if (pdClimate >= maxPd) {
+    throw new Error(`PD0/Climate PD/q fails the self-consistency condition: Climate PD must be below ${fmtPct(maxPd)}, currently ${fmtPct(pdClimate)}.`);
+  }
+  assertPct("LGD0 (%)", asNumber(payload, "lgd0Pct", 10), { allow100: true });
+  assertPct("Confidence level Q (%)", asNumber(payload, "confidenceLevelPct", 99.9));
+  assertRange("Asset volatility (%)", asNumber(payload, "assetVolPct", 30), 0, 500, { highInclusive: true, unit: "%" });
+  assertRange("EAD", asNumber(payload, "ead", 1), 0);
+  assertRange("Maturity adjustment", asNumber(payload, "maturityAdjustment", 1), 0);
+  assertRange("Capital multiplier", asNumber(payload, "capitalMultiplier", 12.5), 0, 1000, { lowInclusive: true });
+  assertRange("Simulation scenarios", Math.floor(asNumber(payload, "nScenarios", 50000)), 100, 2000000, { lowInclusive: true, highInclusive: true });
+  assertRange("Loans per scenario", Math.floor(asNumber(payload, "nLoans", 20000)), 1, 10000000, { lowInclusive: true, highInclusive: true });
+  if (payload.rhoPct !== "" && payload.rhoPct !== undefined) assertPct("rho override (%)", Number(payload.rhoPct));
+  if (payload.lgd1OverridePct !== "" && payload.lgd1OverridePct !== undefined) assertPct("LGD1 override (%)", Number(payload.lgd1OverridePct), { allow100: true });
+  if (payload.lgd1OverridePct !== "" && payload.lgd1OverridePct !== undefined && pct(Number(payload.lgd1OverridePct)) < pct(asNumber(payload, "lgd0Pct", 10))) {
+    throw new Error(`LGD1 override=${fmtPct(pct(Number(payload.lgd1OverridePct)))} cannot be lower than LGD0=${fmtPct(pct(asNumber(payload, "lgd0Pct", 10)))}; physical damage reduces recoverable asset value, so event LGD should not be below baseline LGD.`);
+  }
   return {
     pd0,
     qClimate,
@@ -473,7 +562,7 @@ function calculate() {
     resultsTable.innerHTML = "";
     validationTable.innerHTML = "";
     channelTable.innerHTML = "";
-    runMeta.textContent = "Calculation error";
+    runMeta.textContent = "Input validation error";
     statusEl.textContent = "error";
   }
 }
@@ -530,12 +619,13 @@ function resultColumns(calc) {
 }
 
 function calculateBatch(rows, defaults) {
-  return rows.map((row) => {
+  return rows.map((row, index) => {
+    const excelRow = index + 2;
     try {
       const calc = calculatePayload(batchRowToPayload(row, defaults));
-      return { ...row, calc_status: "ok", calc_error: "", ...resultColumns(calc) };
+      return { ...row, calc_excel_row: excelRow, calc_status: "ok", calc_error: "", ...resultColumns(calc) };
     } catch (err) {
-      return { ...row, calc_status: "error", calc_error: err.message };
+      return { ...row, calc_excel_row: excelRow, calc_status: "error", calc_error: `Data row ${index + 1} (Excel row ${excelRow} if uploaded): ${err.message}` };
     }
   });
 }
