@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Physical Climate Risk Credit Capital Calculator</title>
+    <link rel="stylesheet" href="./app.css">
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div>
+            <h1>Climate Credit Capital</h1>
+            <p>Browser-Based Physical Risk Calculator</p>
+          </div>
+          <span class="status" id="status">ready</span>
+        </div>
+
+        <form id="model-form" class="controls">
+          <section>
+            <h2>Credit Inputs</h2>
+            <div class="grid two">
+              <label>PD0 (%)<input name="pd0Pct" type="number" step="0.001" value="0.3"></label>
+              <label>LGD0 (%)<input name="lgd0Pct" type="number" step="0.1" value="10"></label>
+            </div>
+            <label>Climate PD Mode
+              <select name="pdMode" id="pdMode">
+                <option value="direct">Direct PD</option>
+                <option value="frequency_uplift">Frequency uplift</option>
+              </select>
+            </label>
+            <div id="pd-direct" class="mode-panel">
+              <label>Climate-adjusted PD (%)<input name="pdClimatePct" type="number" step="0.001" value="0.3367"></label>
+            </div>
+            <div id="pd-uplift" class="mode-panel hidden">
+              <div class="grid two">
+                <label>Long-run q (%)<input name="longRunQPct" type="number" step="0.01" value="1.7"></label>
+                <label>Default uplift (%)<input name="defaultUpliftWhenFrequencyDoublesPct" type="number" step="0.1" value="16.1"></label>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <h2>Catastrophe q</h2>
+            <label>Definition
+              <select name="qMode" id="qMode">
+                <option value="direct">Direct probability</option>
+                <option value="return_period">Return period</option>
+                <option value="poisson_rate">Poisson rate</option>
+                <option value="loss_threshold">Loss threshold</option>
+                <option value="intensity_threshold">Intensity threshold</option>
+              </select>
+            </label>
+            <div id="q-direct" class="mode-panel">
+              <label>q (%)<input name="qDirectPct" type="number" step="0.01" value="3"></label>
+            </div>
+            <div id="q-return_period" class="mode-panel hidden">
+              <div class="grid two">
+                <label>Return period<input name="returnPeriodYears" type="number" step="1" value="33"></label>
+                <label>Horizon<input name="horizonYears" type="number" step="0.25" value="1"></label>
+              </div>
+            </div>
+            <div id="q-poisson_rate" class="mode-panel hidden">
+              <div class="grid two">
+                <label>Rate / year<input name="eventRatePerYear" type="number" step="0.001" value="0.03"></label>
+                <label>Horizon<input name="horizonYears" type="number" step="0.25" value="1"></label>
+              </div>
+            </div>
+            <div id="q-loss_threshold" class="mode-panel hidden">
+              <p class="hint">Loss threshold 是“物理损害率/押品损失率达到多少就定义为巨灾”。Scenario loss rates 是巨灾模型给出的一组情景损失率。</p>
+              <label>Loss threshold (%)<input name="lossThresholdPct" type="number" step="0.1" value="10"></label>
+              <label>Scenario loss rates
+                <textarea name="lossRatesText">1, 3, 8, 12, 20, 0, 5, 16, 2, 30</textarea>
+              </label>
+            </div>
+            <div id="q-intensity_threshold" class="mode-panel hidden">
+              <p class="hint">Intensity threshold 是“灾害强度达到多少就定义为巨灾”。Scenario intensities 是台风等级、风速、地震PGA/烈度、洪水深度等情景强度。</p>
+              <label>Intensity threshold<input name="intensityThreshold" type="number" step="0.1" value="3"></label>
+              <label>Scenario intensities
+                <textarea name="intensityValuesText">1, 2, 2.5, 3.2, 4, 1.5, 5, 2.8, 3.6, 4.5</textarea>
+              </label>
+            </div>
+          </section>
+
+          <section>
+            <h2>Model Settings</h2>
+            <div class="grid two">
+              <label>Q (%)<input name="confidenceLevelPct" type="number" step="0.01" value="99.9"></label>
+              <label>Asset vol (%)<input name="assetVolPct" type="number" step="0.1" value="30"></label>
+              <label>EAD<input name="ead" type="number" step="0.1" value="1"></label>
+              <label>Multiplier<input name="capitalMultiplier" type="number" step="0.1" value="12.5"></label>
+              <label>Maturity adj.<input name="maturityAdjustment" type="number" step="0.01" value="1"></label>
+              <label>rho override (%)<input name="rhoPct" type="number" step="0.01" placeholder="auto"></label>
+            </div>
+            <label>LGD1 override (%)<input name="lgd1OverridePct" type="number" step="0.1" placeholder="model"></label>
+          </section>
+
+          <section>
+            <h2>Simulation</h2>
+            <label class="check"><input name="runSimulation" type="checkbox" checked> Run browser Monte Carlo</label>
+            <div class="grid two">
+              <label>Scenarios<input name="nScenarios" type="number" step="1000" value="50000"></label>
+              <label>Loans<input name="nLoans" type="number" step="1000" value="20000"></label>
+              <label>Seed<input name="seed" type="number" step="1" value="20260603"></label>
+            </div>
+          </section>
+
+          <button type="submit" class="primary">Calculate</button>
+        </form>
+      </aside>
+
+      <section class="workspace">
+        <div class="topbar">
+          <div>
+            <h2>Results</h2>
+            <p id="runMeta">All calculations run locally in this browser.</p>
+          </div>
+          <button id="resetBtn" class="ghost" type="button">Reset</button>
+        </div>
+
+        <div class="cards" id="cards"></div>
+
+        <section class="panel">
+          <h3>Batch Excel</h3>
+          <div class="batch-layout">
+            <div class="batch-box">
+              <p class="muted">Upload Excel and calculate row by row in the browser. The result Excel is generated locally.</p>
+              <div class="batch-actions">
+                <button id="downloadTemplateBtn" class="ghost" type="button">Download Template</button>
+                <input id="excelFile" type="file" accept=".xlsx,.xls">
+                <button id="uploadExcelBtn" class="ghost" type="button">Upload & Calculate</button>
+              </div>
+              <p class="hint" id="xlsxStatus">Excel support requires SheetJS loaded from CDN.</p>
+            </div>
+            <div class="batch-box">
+              <p class="muted">Add one direct-q record manually, then calculate added rows and download results.</p>
+              <form id="manual-row-form" class="manual-grid">
+                <input name="id" placeholder="id">
+                <input name="pd0_pct" type="number" step="0.001" placeholder="PD0 %">
+                <input name="pd_climate_pct" type="number" step="0.001" placeholder="Climate PD %">
+                <input name="q_direct_pct" type="number" step="0.01" placeholder="q %">
+                <input name="lgd0_pct" type="number" step="0.1" placeholder="LGD0 %">
+                <button class="ghost" type="submit">Add Row</button>
+              </form>
+              <div class="batch-actions">
+                <button id="runManualBatchBtn" class="ghost" type="button">Calculate Added Rows</button>
+                <button id="clearManualRowsBtn" class="ghost" type="button">Clear Rows</button>
+                <span id="manualRowCount" class="muted">0 rows</span>
+              </div>
+            </div>
+          </div>
+          <div id="batchDownload"></div>
+          <div id="batchTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Derived Parameters</h3>
+          <div id="summaryTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Loss Measures</h3>
+          <div id="resultsTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Simulation Validation</h3>
+          <div id="validationTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Catastrophe Channel</h3>
+          <div id="channelTable"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Input Map</h3>
+          <div id="inputMap"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
